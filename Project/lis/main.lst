@@ -1,0 +1,867 @@
+C51 COMPILER V9.02   MAIN                                                                  06/09/2018 16:51:21 PAGE 1   
+
+
+C51 COMPILER V9.02, COMPILATION OF MODULE MAIN
+OBJECT MODULE PLACED IN .\output\main.obj
+COMPILER INVOKED BY: d:\Program Files\Keil_v5\C51\BIN\C51.EXE ..\main\main.c OPTIMIZE(8,SPEED) BROWSE INCDIR(..\main) DE
+                    -BUG OBJECTEXTEND PRINT(.\lis\main.lst) PREPRINT(.\lis\main.i) OBJECT(.\output\main.obj)
+
+line level    source
+
+   1          #include "display.h"
+   2          #include <intrins.h>
+   3          #include "i2c.h"
+   4          #include "button.h"
+   5          //#include <stdlib.h>
+   6          
+   7          #define PWM_MAX  200
+   8          uint8_t code code_7seg_pwm[] = {0xff,0x7f,0x77,0x5d,0x55,0x52,0x11,0x01};
+   9          
+  10          uint8_t polling_display_timing = 2;
+  11          
+  12          uint8_t TimeoutColse = 60;                      /*超时关闭时长倒计时*/
+  13          /*
+  14          bit 7 常亮开启 1 
+  15          bit 0 - 5 超时时长; 
+  16          */
+  17          uint8_t TimeoutColseMAX = 5;            /*超时关闭预设值*/
+  18          /*
+  19          bit 0 - 1 单个显示,显示模式的索引
+  20          年 温度  -> 月日 星期  ->时分 秒 ->时分 温度
+  21          bit 3 - 6 每bit表示要轮询的显示模式 
+  22          bit 7 开启轮询显示
+  23          */
+  24          uint8_t display_mode_index = 0;         /*数码管显示的模式*/
+  25          uint8_t display_7seg_pwm = 0xff;
+  26          uint8_t display_7seg_pwm_index = 0;
+  27          uint8_t disp_time[7];
+  28          /*
+  29          bit 7 开启 ：1 关闭 ：0
+  30          bit 6 暂停 ：1 启动 ：0
+  31          bit 5 单色 ：1 随机 ：0
+  32          
+  33          bit 0 - 3 递增递减的RGB灯的索引
+  34          */
+  35          uint8_t led_cloor_index = 0x40;         /*led显示灯颜色*/
+  36          uint8_t breathing_rate = 4;                     /*呼吸速率*/
+  37          /* RGB 颜色灯 PWM阈值*/
+  38          uint8_t RGB_ratio[3] = {0}; 
+  39          
+  40          /*
+  41          bit 7 双击
+  42          */
+  43          uint8_t main_key_timing = 0;
+  44          /*
+  45          bit 0 - 6   1 - 7 数码管
+  46          bit 7 是否 开启闪烁
+  47          闪烁的位置
+  48          */
+  49          uint8_t twink_index = 0;
+  50          
+  51          bit TimeFlag1s          = 1;
+  52          bit StartRunFlag        = 1;
+  53          bit DotDispFlag         = 1;
+  54          bit AlarmEnableFlag = 0;
+C51 COMPILER V9.02   MAIN                                                                  06/09/2018 16:51:21 PAGE 2   
+
+  55          bit SetModeFlag         = 0;    /*设置模式标志*/
+  56          bit SetTwinkleFlag  = 0;        /*显示闪烁标志*/
+  57          
+  58          void close_all_low_power()
+  59          {
+  60   1              /*关闭定时器中断*/
+  61   1              ET0 = 0;
+  62   1              ET1 = 0;                        
+  63   1              TR0 = 0;
+  64   1              TR1 = 0;
+  65   1              
+  66   1              /*退出设置*/
+  67   1              SetModeFlag = 0;
+  68   1              /*清楚主按键标记*/
+  69   1              main_key_timing = 0;
+  70   1              /*关闭全彩LED*/
+  71   1              P0 |= 0xe0; 
+  72   1              /*关闭数码管输出*/
+  73   1              DisplayBitSelect(0x00);
+  74   1              DisplayOneLED(0x00);
+  75   1              /*关闭时间小点显示*/
+  76   1              COLON_PIN = 1;
+  77   1              INT0 = 1;                   //ready read INT0 port
+  78   1              INT1 = 1; 
+  79   1              while (!INT0 && !INT1);              //check INT0
+  80   1              _nop_();
+  81   1              _nop_();
+  82   1              PCON = 0x02;                //MCU power down
+  83   1              _nop_();
+  84   1              _nop_();        
+  85   1      }
+  86          
+  87          void init_system_io()
+  88          {
+  89   1              Timer0Init();
+  90   1              Timer1Init();
+  91   1              
+  92   1          IT0 = 1;                        //set INT0 int type (1:Falling 0:Low level)
+  93   1          EX0 = 1;                        //enable INT0 interrupt
+  94   1              
+  95   1              IT1 = 1;
+  96   1          EX1 = 1;
+  97   1              
+  98   1          EA = 1;                         //open global interrupt switch
+  99   1              P0 |= 0xe0;     
+ 100   1      }
+ 101          
+ 102          void rgbled_gradient_breathing()
+ 103          {
+ 104   1              /*哪几种颜色呼吸变换 bit 7 - 5 R G B*/
+ 105   1              uint8_t code on_num[16] ={0x80,0x40,0x20,0xa0,0x60,0xc0,0xe0,0x60,0xa0,0x80,0x20,0xc0,0xa0,0x40,0x80,0xe0
+             -};
+ 106   1              /*bit 0 - 3 哪几个灯呼吸灯索引  
+ 107   1                bit 7 - 5 RGB灯PWM的方向增大还是减小
+ 108   1              */
+ 109   1              static uint8_t RGB_dir = 0xe0;
+ 110   1              uint8_t i;
+ 111   1              
+ 112   1              for(i = 0; i < 3; i++)
+ 113   1              {
+ 114   2                      if(on_num[led_cloor_index & 0x0f] & (0x80>>i))
+ 115   2                      {
+C51 COMPILER V9.02   MAIN                                                                  06/09/2018 16:51:21 PAGE 3   
+
+ 116   3                              if(RGB_ratio[i] == PWM_MAX && (RGB_dir & (0x80>>i)) != 0)       
+ 117   3                              {
+ 118   4                                      RGB_dir &= (~(0x80>>i));
+ 119   4                              }
+ 120   3                              else if(RGB_ratio[i] == 0  && (RGB_dir & (0x80>>i)) == 0)
+ 121   3                              {
+ 122   4      //                              RGB_dir &= 0xf0;
+ 123   4                                      led_cloor_index ++;
+ 124   4                                      led_cloor_index &= 0xef;
+ 125   4                                      
+ 126   4      //                              RGB_dir |= (led_cloor_index & 0x0f);
+ 127   4                                      RGB_dir |= (0x80>>i);
+ 128   4                              }
+ 129   3      
+ 130   3                              if(RGB_dir & (0x80>>i))
+ 131   3                              {
+ 132   4                                      RGB_ratio[i]++;
+ 133   4                              }
+ 134   3                              else 
+ 135   3                              {
+ 136   4                                      RGB_ratio[i]--;
+ 137   4                              }
+ 138   3                      }
+ 139   2              }
+ 140   1      }
+ 141          
+ 142          void display_mode(uint8_t *time,uint8_t index)
+ 143          {
+ 144   1              switch(index)
+ 145   1              {
+ 146   2                      case 0:
+ 147   2                              display_hour_min_sec(time,0);  // 时 分 温度
+ 148   2                              display_temperature();
+ 149   2                              DotDispFlag = 1;
+ 150   2                              break;
+ 151   2                      
+ 152   2                      case 1:
+ 153   2                              display_hour_min_sec(time,1);   //时 分 秒
+ 154   2                              DotDispFlag = 1;
+ 155   2                              break;
+ 156   2                      
+ 157   2                      case 2:
+ 158   2                              display_month_day_week(time);   //月 日 星期
+ 159   2                              DotDispFlag = 0;
+ 160   2                              break;
+ 161   2                      
+ 162   2                      case 3:
+ 163   2                              dispaly_year(time);                             //年 温度
+ 164   2                              if(!SetModeFlag)
+ 165   2                              {
+ 166   3                                      display_temperature();  
+ 167   3                              }
+ 168   2                              else
+ 169   2                              {
+ 170   3                                      display_set_mode(0);
+ 171   3                              }
+ 172   2                              DotDispFlag = 0;
+ 173   2                              break;
+ 174   2                      
+ 175   2                      default:
+ 176   2                              DotDispFlag = 1;                                
+ 177   2                              display_hour_min_sec(time,0);
+C51 COMPILER V9.02   MAIN                                                                  06/09/2018 16:51:21 PAGE 4   
+
+ 178   2                              display_temperature();                          
+ 179   2                              break;  
+ 180   2              }
+ 181   1      }
+ 182          
+ 183          bit polling_display_mode()
+ 184          {
+ 185   1              /*bit 0 - 1 低位计时
+ 186   1                bit 3 - 
+ 187   1              */
+ 188   1              static uint8_t index = 0;
+ 189   1              uint8_t temp;
+ 190   1              bit status = 0;
+ 191   1              
+ 192   1              if(index != 0)
+ 193   1              {
+ 194   2                      index++;
+ 195   2                      
+ 196   2                      if((index & 0x03) < polling_display_timing)
+ 197   2                      {
+ 198   3                              return 1;
+ 199   3                      }
+ 200   2              }
+ 201   1              
+ 202   1              temp = index>>3;
+ 203   1              do{
+ 204   2      
+ 205   2                      temp++;
+ 206   2                      if(temp >= 5)
+ 207   2                      {
+ 208   3                              temp = 0;
+ 209   3                              index = 0;
+ 210   3                              return 0;
+ 211   3                      }
+ 212   2                      
+ 213   2                      if(display_mode_index & (0x80>>temp))
+ 214   2                      {
+ 215   3                              display_mode_index &= ~0x03;                            
+ 216   3                              display_mode_index |= (4 - temp);
+ 217   3                              status = 1;
+ 218   3                      }
+ 219   2                      
+ 220   2              }while(!status);
+ 221   1              index = temp << 3;
+ 222   1                      
+ 223   1              return status;
+ 224   1      }
+ 225          
+ 226          bit timeout_no_operation_quit()
+ 227          {
+ 228   1              if(TimeFlag1s == 1 && StartRunFlag == 1)
+ 229   1              {       
+ 230   2                      TimeFlag1s = 0;
+ 231   2                      if(TimeoutColse > 0)
+ 232   2                      {
+ 233   3                              TimeoutColse--;
+ 234   3                              return  0;
+ 235   3                      }
+ 236   2                      else 
+ 237   2                      {
+ 238   3                              if(TimeoutColseMAX & 0x80 == 0)
+ 239   3                              {
+C51 COMPILER V9.02   MAIN                                                                  06/09/2018 16:51:21 PAGE 5   
+
+ 240   4                                      StartRunFlag = 0;
+ 241   4                              }
+ 242   3                              return 1;
+ 243   3                      }
+ 244   2              }                       
+ 245   1              return  0;
+ 246   1      }
+ 247          
+ 248          void text_data_out_range(uint8_t time_index,uint8_t *time)
+ 249          {
+ 250   1              uint8_t max_value,min_value;
+ 251   1              switch(time_index)
+ 252   1              {
+ 253   2                      case 0:
+ 254   2                              twink_index = 0x60 | 0x80;
+ 255   2                              max_value = 60;
+ 256   2                              min_value = 0;                  
+ 257   2                              break;
+ 258   2                      case 1:
+ 259   2                              twink_index = 0x0c | 0x80;
+ 260   2                              max_value = 60;
+ 261   2                              min_value = 0;
+ 262   2                              break;
+ 263   2                      
+ 264   2                      case 2:
+ 265   2                              twink_index = 0x03 | 0x80;                      
+ 266   2                              max_value = 24;
+ 267   2                              min_value = 0;
+ 268   2                              break;
+ 269   2                      
+ 270   2                      case 3:
+ 271   2                              twink_index = 0x40 | 0x80;                      
+ 272   2                              max_value = 7;
+ 273   2                              min_value = 0;
+ 274   2                              break;
+ 275   2                      
+ 276   2                      case 4:
+ 277   2                              twink_index = 0x0c | 0x80;                      
+ 278   2                              max_value = 32;
+ 279   2                              min_value = 1;
+ 280   2                              break;
+ 281   2                      
+ 282   2                      case 5:
+ 283   2                              twink_index = 0x03 | 0x80;                                              
+ 284   2                              max_value = 13;
+ 285   2                              min_value = 1;
+ 286   2                              break;
+ 287   2                      
+ 288   2                      case 6:
+ 289   2                              twink_index = 0x0c | 0x80;                              
+ 290   2                              max_value = 100;
+ 291   2                              min_value = 00;
+ 292   2                              break;  
+ 293   2                      case 7:
+ 294   2                              max_value = 61;
+ 295   2                              min_value = 00;
+ 296   2                              break;  
+ 297   2                      case 8:
+ 298   2                              max_value = 5;
+ 299   2                              min_value = 1;
+ 300   2                              break;  
+ 301   2                      case 9:
+C51 COMPILER V9.02   MAIN                                                                  06/09/2018 16:51:21 PAGE 6   
+
+ 302   2                              max_value = 4;
+ 303   2                              min_value = 1;
+ 304   2                              break;
+ 305   2                      default:
+ 306   2                              return;
+ 307   2              }       
+ 308   1              if(*time == max_value)
+ 309   1              {
+ 310   2                      *time = min_value;
+ 311   2              }
+ 312   1              else if(*time > max_value) 
+ 313   1              {
+ 314   2                      *time = max_value - 1;
+ 315   2              }
+ 316   1              else if(*time < min_value)
+ 317   1              {
+ 318   2                      *time = max_value - 1;
+ 319   2              }
+ 320   1      }       
+ 321          
+ 322          void button_set_time()
+ 323          {
+ 324   1              uint8_t time_index = 7,button_status,mode_index;
+ 325   1              button_status_bit = 0x01;
+ 326   1              twink_index = 0x80;
+ 327   1              DotDispFlag = 0;
+ 328   1              while(SetModeFlag) 
+ 329   1              {
+ 330   2                      
+ 331   2                      if(button_status_bit == N_key)   //无按键
+ 332   2                      {
+ 333   3                              if(SetTwinkleFlag)
+ 334   3                              {
+ 335   4                                      display_mode(disp_time,mode_index);                             
+ 336   4                              }
+ 337   3                              else 
+ 338   3                              {
+ 339   4                                      display_colse_tab(twink_index);
+ 340   4                              }
+ 341   3                              
+ 342   3                              if(timeout_no_operation_quit())
+ 343   3                              {
+ 344   4                                      return ;
+ 345   4                              }
+ 346   3                              continue;
+ 347   3                      }
+ 348   2                      
+ 349   2                      TimeoutColse = 60;
+ 350   2                      button_status = button_status_bit & 0x03;
+ 351   2                      
+ 352   2                      if(button_status == S_key)   //短按 切换设置的单位
+ 353   2                      {
+ 354   3                              time_index--;                   
+ 355   3                              if(time_index == 6)
+ 356   3                              {
+ 357   4                                      mode_index = 0x03;
+ 358   4                              }
+ 359   3                              else if(time_index >=3 && time_index < 6)
+ 360   3                              {
+ 361   4                                      mode_index = 0x02;
+ 362   4                              }
+ 363   3                              else if(time_index >= 0 && time_index < 3)
+C51 COMPILER V9.02   MAIN                                                                  06/09/2018 16:51:21 PAGE 7   
+
+ 364   3                              {
+ 365   4                                      mode_index = 0x01;
+ 366   4                              }
+ 367   3                              else 
+ 368   3                              {
+ 369   4                                      time_index = 6;
+ 370   4                                      mode_index = 0x03;
+ 371   4                              }
+ 372   3                              display_mode(disp_time,mode_index);
+ 373   3                      }
+ 374   2                      else if(button_status == L_key)  //长按
+ 375   2                      {
+ 376   3                              Set_Time_Dec(disp_time);
+ 377   3                              break;
+ 378   3                      }
+ 379   2                      
+ 380   2                      if(button_status_bit & (S_key<<2))  //按键 加  短按
+ 381   2                      {
+ 382   3                              disp_time[time_index]++; 
+ 383   3                      }
+ 384   2      
+ 385   2                      if(button_status_bit & (S_key<<4)) //按键 减  短按
+ 386   2                      {
+ 387   3                              disp_time[time_index]--;
+ 388   3                      }
+ 389   2                      
+ 390   2                      text_data_out_range(time_index,&disp_time[time_index]);
+ 391   2                      
+ 392   2                      display_mode(disp_time,mode_index);
+ 393   2                      button_status_bit = 0;  
+ 394   2              }
+ 395   1      }
+ 396          
+ 397          void button_set_alarm()
+ 398          {
+ 399   1              uint8_t alarm[3] = {0};
+ 400   1              uint8_t time_index = 0,button_status;
+ 401   1              twink_index = 0x80;     
+ 402   1              button_status_bit = 0x01;
+ 403   1              Enable_Alarm(0);        
+ 404   1              Get_Alarm_EveryDay(alarm + 1);
+ 405   1              while(SetModeFlag) 
+ 406   1              {       
+ 407   2                      if(button_status_bit == N_key)   //无按键
+ 408   2                      {
+ 409   3                              if(SetTwinkleFlag)
+ 410   3                              {
+ 411   4                                      display_alarm_clock(alarm + 1);                 
+ 412   4                              }
+ 413   3                              else 
+ 414   3                              {
+ 415   4                                      display_colse_tab(twink_index);
+ 416   4                              }
+ 417   3                              if(timeout_no_operation_quit())
+ 418   3                              {
+ 419   4                                      return ;
+ 420   4                              }
+ 421   3                              continue;
+ 422   3                      }
+ 423   2                      
+ 424   2                      TimeoutColse = 60;
+ 425   2                      button_status = button_status_bit & 0x03;
+C51 COMPILER V9.02   MAIN                                                                  06/09/2018 16:51:21 PAGE 8   
+
+ 426   2                      
+ 427   2                      if(button_status == S_key)   //短按 切换设置的单位
+ 428   2                      {
+ 429   3                              time_index++;
+ 430   3                              if(time_index >= 3)
+ 431   3                              {
+ 432   4                                      time_index = 0;
+ 433   4                              }
+ 434   3                      }
+ 435   2                      else if(button_status == L_key)  //长按
+ 436   2                      {
+ 437   3                              Set_Alarm_EveryDay(alarm + 1);
+ 438   3                              Enable_Alarm(AlarmEnableFlag);
+ 439   3                              break;
+ 440   3                      }
+ 441   2                      
+ 442   2                      if(button_status_bit & (S_key<<2))  //按键 加  短按
+ 443   2                      {
+ 444   3                              alarm[time_index]++; 
+ 445   3                      }
+ 446   2      
+ 447   2                      if(button_status_bit & (S_key<<4)) //按键 减  短按
+ 448   2                      {
+ 449   3                              alarm[time_index]--;
+ 450   3                      }
+ 451   2                      button_status_bit = 0;
+ 452   2                      text_data_out_range(time_index, &alarm[time_index]);
+ 453   2                      AlarmEnableFlag = alarm[0] & 0x01;
+ 454   2                      display_alarm_clock(alarm + 1);                 
+ 455   2              }
+ 456   1      }
+ 457          
+ 458          void button_function_param()
+ 459          {
+ 460   1              uint8_t polling_index[] = {0x00,0xaa,0xb2,0xf3};
+ 461   1              uint8_t func_index = 0,button_status;
+ 462   1              uint8_t temp_param[3] = {1,1,1};
+ 463   1              DotDispFlag = 0;
+ 464   1              temp_param[0] = (TimeoutColseMAX & 0x7f);
+ 465   1              temp_param[1] = polling_display_timing;
+ 466   1              display_set_mode(func_index + 3);
+ 467   1              while(SetModeFlag) 
+ 468   1              {       
+ 469   2                      if(button_status_bit == N_key)   //无按键
+ 470   2                      {
+ 471   3                              display_function_param(temp_param[func_index]);
+ 472   3                              if(timeout_no_operation_quit())
+ 473   3                              {
+ 474   4                                      return ;
+ 475   4                              }
+ 476   3                              continue;
+ 477   3                      }
+ 478   2                      
+ 479   2                      TimeoutColse = 60;
+ 480   2                      button_status = button_status_bit & 0x03;
+ 481   2                      
+ 482   2                      if(button_status == S_key)   //短按 切换设置的单位
+ 483   2                      {
+ 484   3                              func_index++;
+ 485   3                              if(func_index >= 3)
+ 486   3                              {
+ 487   4                                      func_index = 0;
+C51 COMPILER V9.02   MAIN                                                                  06/09/2018 16:51:21 PAGE 9   
+
+ 488   4                              }
+ 489   3                              display_set_mode(func_index + 3);
+ 490   3                      }
+ 491   2                      else if(button_status == L_key)  //长按
+ 492   2                      {
+ 493   3                              if(temp_param[0] == 0)
+ 494   3                              {
+ 495   4                                      TimeoutColseMAX |= 0x80;
+ 496   4                              }
+ 497   3                              else
+ 498   3                              {
+ 499   4                                      TimeoutColseMAX = temp_param[0];
+ 500   4                              }
+ 501   3                              display_mode_index  = polling_index[temp_param[1] - 1];
+ 502   3                              polling_display_timing  = temp_param[2];
+ 503   3                              break;
+ 504   3                      }
+ 505   2                      
+ 506   2                      if(button_status_bit & (S_key<<2))  //按键 加  短按
+ 507   2                      {
+ 508   3                              temp_param[func_index]++; 
+ 509   3                      }
+ 510   2      
+ 511   2                      if(button_status_bit & (S_key<<4)) //按键 减  短按
+ 512   2                      {
+ 513   3                              temp_param[func_index]--;
+ 514   3                      }       
+ 515   2                      button_status_bit = 0;  
+ 516   2                      text_data_out_range(func_index + 7 ,&temp_param[func_index]);
+ 517   2                      
+ 518   2              }
+ 519   1      }
+ 520          
+ 521          void button_process()
+ 522          {
+ 523   1              static uint8_t set_mode_index = 0;
+ 524   1              uint8_t button_status;
+ 525   1              if(button_status_bit == N_key)   //无按键
+ 526   1              {
+ 527   2                      return ;
+ 528   2              }
+ 529   1              
+ 530   1              TimeoutColse = 60;
+ 531   1              button_status = button_status_bit & 0x03;
+ 532   1              
+ 533   1              if(button_status == S_key)   //功能键  短按
+ 534   1              {
+ 535   2                      if(SetModeFlag) /*若在设置模式*/
+ 536   2                      {
+ 537   3                              set_mode_index++;
+ 538   3                              if(set_mode_index >= 3)
+ 539   3                              {
+ 540   4                                      set_mode_index = 0;
+ 541   4                              }
+ 542   3                              display_set_mode(set_mode_index);               
+ 543   3                      }
+ 544   2                      else
+ 545   2                      {       /*切换显示模式*/
+ 546   3                              display_mode_index++;
+ 547   3                              display_mode_index &= 0xfb;     
+ 548   3                              display_mode(disp_time,display_mode_index & 0x03);
+ 549   3                      }
+C51 COMPILER V9.02   MAIN                                                                  06/09/2018 16:51:21 PAGE 10  
+
+ 550   2      
+ 551   2              }
+ 552   1              else if(button_status == L_key)  //长按
+ 553   1              {
+ 554   2                      if(!SetModeFlag)
+ 555   2                      {
+ 556   3                              SetModeFlag = 1;
+ 557   3                              set_mode_index = 0;     
+ 558   3                              display_set_mode(set_mode_index);
+ 559   3                      }
+ 560   2                      else 
+ 561   2                      {
+ 562   3                              display_mode_index &= 0xf8;
+ 563   3                              SetModeFlag = 0;
+ 564   3                              display_mode(disp_time,0);
+ 565   3                      }
+ 566   2                      while(Button_SET == 0);
+ 567   2              }
+ 568   1              
+ 569   1              button_status = (button_status_bit >> 2) & 0x03;                
+ 570   1              if(button_status == S_key)  //短按 进入设置
+ 571   1              {
+ 572   2                      if(SetModeFlag)
+ 573   2                      {       
+ 574   3                              button_status_bit = 0;                  
+ 575   3                              switch(set_mode_index)
+ 576   3                              {
+ 577   4                                      case 0:
+ 578   4                                              button_set_time();
+ 579   4                                              break;
+ 580   4                                      case 1:
+ 581   4                                              button_set_alarm();
+ 582   4                                              break;
+ 583   4      
+ 584   4                                      case 2:
+ 585   4                                              button_function_param();
+ 586   4                                              break;
+ 587   4                                      default:
+ 588   4                                              break;
+ 589   4                              }
+ 590   3                              display_mode_index &= 0xf8;
+ 591   3                              twink_index = 0;
+ 592   3                              display_set_mode(0xe0);
+ 593   3                              while(Button_SET == 0);
+ 594   3                              SetModeFlag = 0;
+ 595   3                      }
+ 596   2                      else if(led_cloor_index & 0x80 && TR1 == 1)
+ 597   2                      {
+ 598   3                              led_cloor_index ++;
+ 599   3                              led_cloor_index &= 0xef;
+ 600   3                      }
+ 601   2                      else 
+ 602   2                      {
+ 603   3                              display_7seg_pwm = code_7seg_pwm[display_7seg_pwm_index++];
+ 604   3                              if(display_7seg_pwm_index >= 8)
+ 605   3                              {
+ 606   4                                      display_7seg_pwm_index = 0;
+ 607   4                              }
+ 608   3                      }
+ 609   2              }
+ 610   1              else if(button_status == L_key)
+ 611   1              {
+C51 COMPILER V9.02   MAIN                                                                  06/09/2018 16:51:21 PAGE 11  
+
+ 612   2                      if(led_cloor_index & 0x80 && TR1 == 1)
+ 613   2                      {
+ 614   3                              if(led_cloor_index & 0x40)
+ 615   3                              {
+ 616   4                                      led_cloor_index &= ~0x40;
+ 617   4                              }
+ 618   3                              else 
+ 619   3                              {
+ 620   4                                      led_cloor_index |= 0x40;                                
+ 621   4                              }
+ 622   3                              while(Button_PLUSE == 0);
+ 623   3                      }                       
+ 624   2              }
+ 625   1      
+ 626   1              button_status = (button_status_bit >> 4) & 0x03;                        
+ 627   1              if(button_status == S_key) //按键 减  短按
+ 628   1              {
+ 629   2                      if(led_cloor_index & 0x80 && TR1 == 1)
+ 630   2                      {
+ 631   3                              breathing_rate++;
+ 632   3                              if(breathing_rate >= 10)
+ 633   3                              {
+ 634   4                                      breathing_rate = 0;
+ 635   4                              }
+ 636   3                      }
+ 637   2                      else if(SetModeFlag == 0)
+ 638   2                      {
+ 639   3                              TimeoutColse = 0;
+ 640   3                              close_all_low_power();
+ 641   3                      }                       
+ 642   2              }
+ 643   1              else if(button_status == L_key)
+ 644   1              {
+ 645   2                      TimeoutColse = 0;
+ 646   2                      close_all_low_power();          
+ 647   2              }
+ 648   1      
+ 649   1              button_status_bit = 0;
+ 650   1      }
+ 651          
+ 652          void main()
+ 653          {               
+ 654   1              init_system_io();       
+ 655   1              AlarmEnableFlag = Get_Alarm_Status();
+ 656   1              if(!Get_Init_RX8025_Flag())
+ 657   1              {
+ 658   2                      Recovery_Default_Setting();
+ 659   2              }
+ 660   1              
+ 661   1              while(1)
+ 662   1              {
+ 663   2                      
+ 664   2                      if(TimeFlag1s == 1 && StartRunFlag == 1)
+ 665   2                      {       
+ 666   3                              TimeFlag1s = 0;
+ 667   3                              if(TimeoutColse > 0)
+ 668   3                              {
+ 669   4                                      TimeoutColse--;
+ 670   4                              }
+ 671   3                              else if((TimeoutColseMAX & 0x80) == 0)
+ 672   3                              {
+ 673   4                                      StartRunFlag = 0;
+C51 COMPILER V9.02   MAIN                                                                  06/09/2018 16:51:21 PAGE 12  
+
+ 674   4                              }
+ 675   3                              
+ 676   3                              if(!SetModeFlag)
+ 677   3                              {
+ 678   4                                      if(display_mode_index & 0x80)
+ 679   4                                      {
+ 680   5                                              polling_display_mode();
+ 681   5                                      }
+ 682   4                                      Get_Time_Dec(disp_time);
+ 683   4                                      display_mode(disp_time,display_mode_index & 0x03);
+ 684   4                              }                               
+ 685   3                      }               
+ 686   2      
+ 687   2                      
+ 688   2                      if(!StartRunFlag)
+ 689   2                      {
+ 690   3                              close_all_low_power();
+ 691   3                      }
+ 692   2                      button_process();
+ 693   2              }               
+ 694   1      }
+ 695          
+ 696          void Exint0() interrupt 0           //(location at 0003H)
+ 697          {
+ 698   1              uint8_t timeout = 50;
+ 699   1              StartRunFlag = 1;
+ 700   1              TimeoutColse = (TimeoutColseMAX & 0x7f);
+ 701   1              ET0 = 1;        
+ 702   1              TR0 = 1;
+ 703   1              TimeFlag1s = 1; 
+ 704   1              if((main_key_timing & 0x80 == 0x80) && (main_key_timing & 0x3f) <= 50)
+ 705   1              {
+ 706   2                      ET1 = 1;        
+ 707   2                      TR1 = 1;
+ 708   2                      led_cloor_index |= 0x80;        
+ 709   2              }
+ 710   1              main_key_timing |= 0x80;
+ 711   1      }
+ 712          
+ 713          void Exint1() interrupt 2 
+ 714          {
+ 715   1              StartRunFlag = 1;
+ 716   1              TimeoutColse = 60;
+ 717   1              ET0 = 1;        
+ 718   1              TR0 = 1;
+ 719   1              TimeFlag1s = 1;
+ 720   1              ET1 = 1;        
+ 721   1              TR1 = 1;
+ 722   1              led_cloor_index |= 0x80;                
+ 723   1      }
+ 724          
+ 725          
+ 726          /*2ms 进入一次*/
+ 727          void InterruptTime0() interrupt 1
+ 728          {
+ 729   1              static uint16_t i = 0;
+ 730   1      
+ 731   1              i++;
+ 732   1              
+ 733   1              if(i == 200)
+ 734   1              {
+ 735   2                      SetTwinkleFlag = 1;
+C51 COMPILER V9.02   MAIN                                                                  06/09/2018 16:51:21 PAGE 13  
+
+ 736   2                      if(SetModeFlag == 0)
+ 737   2                      {
+ 738   3                              COLON_PIN = 1;
+ 739   3                      }
+ 740   2              }
+ 741   1              else if(i == 1000)
+ 742   1              {
+ 743   2                      SetTwinkleFlag = 0;
+ 744   2      
+ 745   2                      COLON_PIN = ~DotDispFlag;       
+ 746   2                      
+ 747   2              }
+ 748   1              
+ 749   1              if(i >= 1000)
+ 750   1              {
+ 751   2                      i = 0;
+ 752   2                      TimeFlag1s = 1;
+ 753   2              }
+ 754   1              
+ 755   1              if(i % breathing_rate == 0)
+ 756   1              {
+ 757   2                      if(led_cloor_index & 0x80)
+ 758   2                      {
+ 759   3                              if(led_cloor_index & 0x40)
+ 760   3                              {
+ 761   4                                      rgbled_gradient_breathing();
+ 762   4                              }
+ 763   3                      }
+ 764   2                      else
+ 765   2                      {
+ 766   3                              P0 |= 0xe0;     
+ 767   3                      }
+ 768   2              }
+ 769   1              
+ 770   1              if(i % 20 == 0)
+ 771   1              {
+ 772   2                      button_scanning();
+ 773   2                      if(main_key_timing & 0x80)
+ 774   2                      {
+ 775   3                              main_key_timing ++;
+ 776   3                              if((main_key_timing & 0x3f) == 0x3f)
+ 777   3                              {
+ 778   4                                      main_key_timing = 0;
+ 779   4                              }
+ 780   3                      }
+ 781   2              }
+ 782   1              
+ 783   1              TL0 = 0x30;             //设置定时初值
+ 784   1              TH0 = 0xF8;             //设置定时初值
+ 785   1              if(display_7seg_pwm & (0x01 << (i % 8)))
+ 786   1              {
+ 787   2                      display_dynamic_buff();
+ 788   2              }
+ 789   1              else 
+ 790   1              {
+ 791   2                      DisplayBitSelect(0xf0);
+ 792   2                      DisplayOneLED(0x00);
+ 793   2                      /*关闭数码管输出*/
+ 794   2                      DisplayBitSelect(0x00);
+ 795   2              }
+ 796   1      }
+ 797          
+C51 COMPILER V9.02   MAIN                                                                  06/09/2018 16:51:21 PAGE 14  
+
+ 798          void InterruptTime1() interrupt 3
+ 799          {
+ 800   1              static uint8_t count = 0;
+ 801   1              uint8_t i;
+ 802   1              TR1 = 0;
+ 803   1              count++;        
+ 804   1              for(i = 0; i < 3; i++)
+ 805   1              {
+ 806   2                      if(count < RGB_ratio[i])
+ 807   2                      {
+ 808   3                              P0 &= (~(0x20 << i));
+ 809   3                      }
+ 810   2                      else 
+ 811   2                      {
+ 812   3                              P0 |= (0x20 << i);      
+ 813   3                      }
+ 814   2              }               
+ 815   1              TR1 = 1;        
+ 816   1      }
+
+
+MODULE INFORMATION:   STATIC OVERLAYABLE
+   CODE SIZE        =   1908    ----
+   CONSTANT SIZE    =     34    ----
+   XDATA SIZE       =   ----    ----
+   PDATA SIZE       =   ----    ----
+   DATA SIZE        =     26      23
+   IDATA SIZE       =   ----    ----
+   BIT SIZE         =      6       1
+END OF MODULE INFORMATION.
+
+
+C51 COMPILATION COMPLETE.  0 WARNING(S),  0 ERROR(S)

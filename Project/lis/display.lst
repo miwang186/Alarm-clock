@@ -1,0 +1,297 @@
+C51 COMPILER V9.02   DISPLAY                                                               06/09/2018 16:51:22 PAGE 1   
+
+
+C51 COMPILER V9.02, COMPILATION OF MODULE DISPLAY
+OBJECT MODULE PLACED IN .\output\display.obj
+COMPILER INVOKED BY: d:\Program Files\Keil_v5\C51\BIN\C51.EXE ..\main\display.c OPTIMIZE(8,SPEED) BROWSE INCDIR(..\main)
+                    - DEBUG OBJECTEXTEND PRINT(.\lis\display.lst) PREPRINT(.\lis\display.i) OBJECT(.\output\display.obj)
+
+line level    source
+
+   1          #include "display.h"
+   2          #include "ds18b20.h"
+   3          #include <STC89C5xRC.H>
+   4          #include "i2c.h"
+   5          
+   6          sbit HC595DIO_P = P3^7;
+   7          sbit HC595CS_P  = P3^6;
+   8          sbit HC595CLK_P = P3^5;
+   9          
+  10          sbit HC595DIO_T = P1^7;
+  11          sbit HC595CS_T  = P1^6;
+  12          sbit HC595CLK_T = P1^5;
+  13          
+  14          /*共阴数字段码 0123456789abcdef */
+  15          uint8_t code DispTabAnode[]={0x3f,0x06,0x5b,0x4f,0x66,0x6d,0x7d,0x07, 0x7f,0x6f,0x77,0x7c,0x39,0x5e,0x79,0
+             -x71,0x00};
+  16          /*共阳数字段码 0123456789abcdef */
+  17          uint8_t code DispTabCathode[]={0xc0,0xcf,0xa4,0x86,0x8b,0x92,0x90,0xc7,0x80,0x82,0x81,0x98,0xf0,0x8c,0xb0,
+             -0xb1,0xff};
+  18          
+  19          /*
+  20          0 - 3 时间 共阴
+  21          4 - 6 温度 共阳
+  22          */
+  23          uint8_t code display_palce[]={0x70,0xb0,0xd0,0xe0,0xf8,0xf4,0xf2,0xf0};
+  24          
+  25          /*显示缓存 2ms 显示一个*/
+  26          uint8_t display_buff[8]={0x00,0x00,0x00,0x00,0xff,0xff,0xff,0xff};
+  27          
+  28          extern bit AlarmEnableFlag;
+  29          void Timer0Init(void)   //2毫秒@12.000MHz
+  30          {
+  31   1              EA = 1;
+  32   1              AUXR &= 0x7F;           //定时器时钟6T模式
+  33   1              TMOD &= 0xF0;           //设置定时器模式
+  34   1              TMOD |= 0x01;           //设置定时器模式
+  35   1              TL0 = 0x30;             //设置定时初值
+  36   1              TH0 = 0xF8;             //设置定时初值
+  37   1              TF0 = 0;                //清除TF0标志
+  38   1              ET0 = 1;
+  39   1              TR0 = 1;                //定时器0开始计时
+  40   1      }
+  41          
+  42          void Timer1Init(void)           //10微秒@12.000MHz
+  43          {
+  44   1              AUXR &= 0xBF;           //定时器时钟6T模式
+  45   1              TMOD &= 0x0F;           //设置定时器模式
+  46   1              TMOD |= 0x20;           //设置定时器模式
+  47   1              TL1 = 0xEC;             //设置定时初值
+  48   1              TH1 = 0xEC;             //设置定时重载值
+  49   1              TF1 = 0;                //清除TF1标志
+  50   1              ET1 = 1;
+  51   1              TR1 = 1;                //定时器1开始计时
+  52   1      }
+C51 COMPILER V9.02   DISPLAY                                                               06/09/2018 16:51:22 PAGE 2   
+
+  53          
+  54          void DisplayBitSelect(uint8_t dat)
+  55          {
+  56   1              uint8_t i;
+  57   1              
+  58   1              HC595CLK_P = 0; 
+  59   1              HC595CS_P = 0;
+  60   1              for(i = 0; i < 8; i++)
+  61   1              {
+  62   2                      if(dat & 0x80)
+  63   2                      {
+  64   3                              HC595DIO_P = 1;
+  65   3                      }
+  66   2                      else 
+  67   2                      {
+  68   3                              HC595DIO_P = 0;
+  69   3                      }
+  70   2                      HC595CLK_P = 1;
+  71   2                      dat <<= 1;
+  72   2                      HC595CLK_P = 0;
+  73   2              }
+  74   1              HC595CS_P = 1;
+  75   1              HC595CS_P = 0;
+  76   1      }
+  77          
+  78          void DisplayOneLED(uint8_t dat)
+  79          {
+  80   1              uint8_t i;
+  81   1              
+  82   1              HC595CLK_T = 0; 
+  83   1              HC595CS_T = 0;
+  84   1              for(i = 0; i < 8; i++)
+  85   1              {
+  86   2                      if(dat & 0x80)
+  87   2                      {
+  88   3                              HC595DIO_T = 1;
+  89   3                      }
+  90   2                      else 
+  91   2                      {
+  92   3                              HC595DIO_T = 0;
+  93   3                      }
+  94   2                      HC595CLK_T = 1;
+  95   2                      dat <<= 1;
+  96   2                      HC595CLK_T = 0;
+  97   2              }
+  98   1              HC595CS_T = 1;
+  99   1              HC595CS_T = 0;
+ 100   1      }
+ 101          
+ 102          void display_dynamic_buff()
+ 103          {
+ 104   1              static uint8_t index = 0;
+ 105   1              
+ 106   1              DisplayBitSelect(0xf0);
+ 107   1              DisplayOneLED(display_buff[index]);
+ 108   1              DisplayBitSelect(display_palce[index]); 
+ 109   1              index ++;
+ 110   1              if(index >= 7)
+ 111   1              {
+ 112   2                      index = 0;
+ 113   2              }
+ 114   1      }
+C51 COMPILER V9.02   DISPLAY                                                               06/09/2018 16:51:22 PAGE 3   
+
+ 115          
+ 116          void display_temperature()
+ 117          {
+ 118   1              int temperature;        
+ 119   1              temperature = DS18B20Read_Dat();        
+ 120   1              display_buff[6] = 0x33;/*摄氏度符号*/
+ 121   1              if(temperature >= 0) 
+ 122   1              {
+ 123   2                      temperature = temperature*0.0625;
+ 124   2                      //正温度        
+ 125   2                      display_buff[4] = DispTabCathode[temperature/10%10];
+ 126   2                      display_buff[5] = DispTabCathode[temperature%10];                               
+ 127   2              }
+ 128   1              else
+ 129   1              {
+ 130   2                      temperature =(~temperature+1)*0.0625;
+ 131   2                      //负温度时，取反加1再乘以0.0625得实际温度，乘10+0.5显示小数点一位，且四舍五入
+ 132   2                      if(temperature < 10)
+ 133   2                      {
+ 134   3                              display_buff[4] = 0xbf;
+ 135   3                              display_buff[5] = DispTabCathode[temperature%10];       
+ 136   3                      }
+ 137   2                      else 
+ 138   2                      {
+ 139   3                              display_buff[4] = 0xbf;
+ 140   3                              display_buff[5] = DispTabCathode[temperature/10%10];
+ 141   3                              display_buff[6] = DispTabCathode[temperature%10];                                                               
+ 142   3                      }
+ 143   2              }       
+ 144   1      }
+ 145          
+ 146          void dispaly_year(uint8_t *time)
+ 147          {
+ 148   1              display_buff[0] = DispTabAnode[2];
+ 149   1              display_buff[1] = DispTabAnode[0];
+ 150   1              display_buff[2] = DispTabAnode[time[6] / 10];
+ 151   1              display_buff[3] = DispTabAnode[time[6] % 10];
+ 152   1      }
+ 153          
+ 154          void display_month_day_week(uint8_t *time)
+ 155          {
+ 156   1      //      uint8_t time[3];/*星期 日 月*/
+ 157   1      //      
+ 158   1      //      RX8025ReadBytes(RX8025_ADDR_WEEK,&time,3);
+ 159   1              
+ 160   1              display_buff[0] = DispTabAnode[time[5] / 10];
+ 161   1              display_buff[1] = DispTabAnode[time[5] % 10] | 0x80;
+ 162   1              display_buff[2] = DispTabAnode[time[4] / 10];
+ 163   1              display_buff[3] = DispTabAnode[time[4] % 10];   
+ 164   1              
+ 165   1              display_buff[4] = DispTabCathode[16];   
+ 166   1              display_buff[5] = DispTabCathode[16];
+ 167   1              display_buff[6] = DispTabCathode[time[3] % 10]; 
+ 168   1      }
+ 169          
+ 170          void display_hour_min_sec(uint8_t *time,bit is_sec)
+ 171          {
+ 172   1      //      uint8_t time[3];/*秒 分 时*/
+ 173   1      //      
+ 174   1      //      RX8025ReadBytes(RX8025_ADDR_SEC,&time,3);
+ 175   1              
+ 176   1              display_buff[0] = DispTabAnode[time[2] / 10];
+C51 COMPILER V9.02   DISPLAY                                                               06/09/2018 16:51:22 PAGE 4   
+
+ 177   1              display_buff[1] = DispTabAnode[time[2] % 10];
+ 178   1              display_buff[2] = DispTabAnode[time[1] / 10];
+ 179   1              display_buff[3] = DispTabAnode[time[1] % 10]|((uint8_t)AlarmEnableFlag<<7);     
+ 180   1              if(is_sec)
+ 181   1              {
+ 182   2                      display_buff[4] = DispTabCathode[16];   
+ 183   2                      display_buff[5] = DispTabCathode[time[0] / 10];
+ 184   2                      display_buff[6] = DispTabCathode[time[0] % 10]; 
+ 185   2              }
+ 186   1      }
+ 187          void display_colse_tab(uint8_t index)
+ 188          {
+ 189   1              uint8_t i;
+ 190   1              for(i = 0; i < 7; i++)
+ 191   1              {
+ 192   2                      if(index & (0x01<<i))
+ 193   2                      {
+ 194   3                              if(i<4)
+ 195   3                                      display_buff[i] = DispTabAnode[16];
+ 196   3                              else 
+ 197   3                                      display_buff[i] = DispTabCathode[16];
+ 198   3                      }
+ 199   2              }
+ 200   1      }
+ 201          void display_set_mode(uint8_t index)
+ 202          {
+ 203   1              switch (index)
+ 204   1              {
+ 205   2                      case 0:         
+ 206   2                              display_buff[4] = DispTabCathode[0x0c]; 
+ 207   2                              display_buff[5] = DispTabCathode[0x00];
+ 208   2                              display_buff[6] = DispTabCathode[0x00]; 
+ 209   2                              break;
+ 210   2                      case 1:
+ 211   2                              display_buff[4] = DispTabCathode[0x0A]; 
+ 212   2                              display_buff[5] = DispTabCathode[0x00];
+ 213   2                              display_buff[6] = DispTabCathode[0x00]; 
+ 214   2                              break;
+ 215   2                      case 2:
+ 216   2                      case 3:
+ 217   2                      case 4:
+ 218   2                      case 5: 
+ 219   2                              display_buff[4] = DispTabCathode[0x0F]; 
+ 220   2                              display_buff[5] = DispTabCathode[0x00];
+ 221   2                              display_buff[6] = DispTabCathode[index-2];                              
+ 222   2                              break;
+ 223   2                      
+ 224   2                      case 0xe0:
+ 225   2                              display_buff[0] = DispTabAnode[16];
+ 226   2                              display_buff[1] = DispTabAnode[16];
+ 227   2                              display_buff[2] = DispTabAnode[16];
+ 228   2                              display_buff[3] = DispTabAnode[16];
+ 229   2                              display_buff[4] = DispTabCathode[0x0E]; 
+ 230   2                              display_buff[5] = DispTabCathode[0x00];
+ 231   2                              display_buff[6] = DispTabCathode[0x00];                         
+ 232   2                              break;  
+ 233   2              }
+ 234   1      }
+ 235          
+ 236          void display_function_param(uint8_t dat)
+ 237          {
+ 238   1              display_buff[0] = 0x40;
+C51 COMPILER V9.02   DISPLAY                                                               06/09/2018 16:51:22 PAGE 5   
+
+ 239   1              display_buff[1] = DispTabAnode[dat / 10];
+ 240   1              display_buff[2] = DispTabAnode[dat % 10];
+ 241   1              display_buff[3] = 0x40; 
+ 242   1      }
+ 243          
+ 244          void display_alarm_clock(uint8_t *alarm)
+ 245          {
+ 246   1              display_buff[0] = DispTabAnode[alarm[1] / 10];
+ 247   1              display_buff[1] = DispTabAnode[alarm[1] % 10];
+ 248   1              display_buff[2] = DispTabAnode[alarm[0] / 10];
+ 249   1              display_buff[3] = DispTabAnode[alarm[0] % 10];
+ 250   1      
+ 251   1              display_buff[4] = DispTabCathode[0x0a];         
+ 252   1              if(AlarmEnableFlag)
+ 253   1              {
+ 254   2                      display_buff[5] = 0x9c;
+ 255   2                      display_buff[6] = 0x9d;         
+ 256   2              }
+ 257   1              else
+ 258   1              {
+ 259   2                      display_buff[5] = 0x9c;
+ 260   2                      display_buff[6] = DispTabCathode[0x0f];                         
+ 261   2              }
+ 262   1      }
+ 263          
+
+
+MODULE INFORMATION:   STATIC OVERLAYABLE
+   CODE SIZE        =    830    ----
+   CONSTANT SIZE    =     42    ----
+   XDATA SIZE       =   ----    ----
+   PDATA SIZE       =   ----    ----
+   DATA SIZE        =      9    ----
+   IDATA SIZE       =   ----    ----
+   BIT SIZE         =   ----       1
+END OF MODULE INFORMATION.
+
+
+C51 COMPILATION COMPLETE.  0 WARNING(S),  0 ERROR(S)

@@ -1,0 +1,247 @@
+C51 COMPILER V9.02   RX8025                                                                01/07/2018 19:42:02 PAGE 1   
+
+
+C51 COMPILER V9.02, COMPILATION OF MODULE RX8025
+OBJECT MODULE PLACED IN .\output\RX8025.obj
+COMPILER INVOKED BY: D:\Program Files (x86)\Keil_v5\C51\BIN\C51.EXE ..\main\RX8025.c OPTIMIZE(8,SPEED) BROWSE DEBUG OBJE
+                    -CTEXTEND PRINT(.\lis\RX8025.lst) TABS(2) PREPRINT(.\lis\RX8025.i) OBJECT(.\output\RX8025.obj)
+
+line level    source
+
+   1          //////////////////////////////////////////////////////
+   2          ////////////时间日期芯片RX8025///////////////////////
+   3          ////////////////////////////////////////////////////
+   4          #include "RX8025.h"
+   5          #include "intrins.h"
+   6          
+   7          static unsigned char RX8025_State;
+   8          unsigned char gTime[RX8025_TIME_LENGTH];
+   9          
+  10          void DelayUs(char i)
+  11          {
+  12   1        do{
+  13   2        _nop_();
+  14   2        _nop_();
+  15   2        _nop_();
+  16   2        _nop_();
+  17   2        _nop_();
+  18   2        _nop_();
+  19   2        }while(i--);
+  20   1      }
+  21          
+  22          
+  23          void RX8025_IIC_Init(void)
+  24          { 
+  25   1        RX8025_SCK_HIGH();
+  26   1        RX8025_SDA_HIGH();
+  27   1      }
+  28          
+  29          void RX8025_IIC_Start(void)
+  30          {
+  31   1        RX8025_SCK_HIGH();
+  32   1        RX8025_SDA_HIGH();
+  33   1      
+  34   1        RX8025_SDA_LOW();
+  35   1        DelayUs(RX8025_SPEED);
+  36   1        RX8025_SCK_LOW();
+  37   1        DelayUs(RX8025_SPEED);
+  38   1      }
+  39          
+  40          
+  41          void RX8025_IIC_Stop(void)
+  42          {
+  43   1        RX8025_SDA_LOW();
+  44   1        DelayUs(RX8025_SPEED);
+  45   1        RX8025_SCK_HIGH();  
+  46   1        DelayUs(RX8025_SPEED);
+  47   1        RX8025_SDA_HIGH();
+  48   1        DelayUs(RX8025_SPEED);
+  49   1      }
+  50          
+  51          
+  52          void RX8025_IIC_WriteByte(unsigned char Data)
+  53          {
+  54   1        unsigned char i;
+C51 COMPILER V9.02   RX8025                                                                01/07/2018 19:42:02 PAGE 2   
+
+  55   1        for(i=0;i<8;i++)
+  56   1        {
+  57   2          if( (Data & 0x80) == 0x00 )
+  58   2          {
+  59   3            RX8025_SDA_LOW();
+  60   3          }
+  61   2          else
+  62   2          {
+  63   3            RX8025_SDA_HIGH();
+  64   3          }
+  65   2          RX8025_SCK_HIGH();
+  66   2          DelayUs(RX8025_SPEED);
+  67   2          RX8025_SCK_LOW();
+  68   2          DelayUs(RX8025_SPEED);
+  69   2          Data <<= 1;
+  70   2        }
+  71   1        
+  72   1        RX8025_SCK_HIGH();//读取数据第九位-从机确认位
+  73   1        DelayUs(RX8025_SPEED);
+  74   1      
+  75   1        i = RX8025_SDA_GET(); //检测是否有应答
+  76   1        if( i!=0x00 )
+  77   1        {
+  78   2          RX8025_State = RX8025_STATE_NOACK;
+  79   2        }
+  80   1        else
+  81   1        {
+  82   2          RX8025_State = RX8025_STATE_ACK;
+  83   2        }
+  84   1      
+  85   1        RX8025_SCK_LOW();
+  86   1        DelayUs(RX8025_SPEED);
+  87   1      }
+  88          
+  89          
+  90          
+  91          unsigned char RX8025_IIC_ReadByte(unsigned char ACK)
+  92          {
+  93   1        unsigned char i,Data,temp;
+  94   1      
+  95   1        Data = 0x00;
+  96   1      
+  97   1        for(i=0;i<8;i++)
+  98   1        {
+  99   2          Data <<= 1;
+ 100   2          
+ 101   2          RX8025_SCK_HIGH();
+ 102   2          DelayUs(RX8025_SPEED);    
+ 103   2          temp = RX8025_SDA_GET();
+ 104   2      
+ 105   2          if( temp!=0x00 )
+ 106   2          {
+ 107   3            Data |= 0x01;
+ 108   3          }
+ 109   2          else
+ 110   2          {
+ 111   3          }
+ 112   2          RX8025_SCK_LOW();
+ 113   2          DelayUs(RX8025_SPEED);
+ 114   2      
+ 115   2        }
+ 116   1        //主机读数据时，需要根据工作状况发送ACK 
+C51 COMPILER V9.02   RX8025                                                                01/07/2018 19:42:02 PAGE 3   
+
+ 117   1        if(ACK) //发应答
+ 118   1        {
+ 119   2          RX8025_SDA_LOW();
+ 120   2        }
+ 121   1        else
+ 122   1        {
+ 123   2          RX8025_SDA_HIGH();    //不发应答
+ 124   2        }
+ 125   1        RX8025_SCK_HIGH();
+ 126   1        DelayUs(RX8025_SPEED);
+ 127   1        RX8025_SCK_LOW();
+ 128   1        DelayUs(RX8025_SPEED);
+ 129   1      
+ 130   1        return Data;
+ 131   1      }
+ 132          
+ 133          
+ 134          
+ 135          /*--------------------------------------------------------------------
+ 136          函数名称：RX8025读日期时间
+ 137          函数功能：
+ 138          注意事项：无
+ 139          提示说明：无
+ 140          输 入：
+ 141          返 回：无
+ 142          --------------------------------------------------------------------*/
+ 143          void RX8025_GetDateTime(unsigned char *timebuf)
+ 144          {
+ 145   1        unsigned char i;
+ 146   1        uint8_t buf[RX8025_TIME_LENGTH];
+ 147   1        RX8025_IIC_Start();
+ 148   1        RX8025_IIC_WriteByte(RX8025_WR);
+ 149   1        RX8025_IIC_WriteByte(0x00);
+ 150   1        
+ 151   1        RX8025_IIC_Start();
+ 152   1        RX8025_IIC_WriteByte(RX8025_RD);
+ 153   1        for (i=0x00;i<RX8025_TIME_LENGTH;i++)
+ 154   1        {
+ 155   2          buf[i]=RX8025_IIC_ReadByte(1);//接收后，单片机回复应答
+ 156   2        }
+ 157   1        RX8025_IIC_ReadByte(0);//接收后，单片机不回复应答
+ 158   1        RX8025_IIC_Stop();
+ 159   1        
+ 160   1        //buf[RX8025_ADDR_SEC] &= ~RX8025_CH;
+ 161   1        //buf[RX8025_ADDR_HOUR] &= ~RX8025_24H;
+ 162   1        
+ 163   1        for (i=0;i<RX8025_TIME_LENGTH;i++)
+ 164   1        {
+ 165   2          timebuf[i] = buf[i];
+ 166   2        }
+ 167   1      }
+ 168          
+ 169          
+ 170          /*--------------------------------------------------------------------
+ 171          函数名称：DS1302设置日期时间
+ 172          函数功能：
+ 173          注意事项：无
+ 174          提示说明：无
+ 175          输 入：
+ 176          返 回：无
+ 177          --------------------------------------------------------------------*/
+ 178          void RX8025_SetDateTime(unsigned char *timebuf)
+C51 COMPILER V9.02   RX8025                                                                01/07/2018 19:42:02 PAGE 4   
+
+ 179          {
+ 180   1        unsigned char i;
+ 181   1      
+ 182   1        RX8025_IIC_Start();
+ 183   1        RX8025_IIC_WriteByte(RX8025_WR);
+ 184   1        RX8025_IIC_WriteByte(0x00);
+ 185   1        for (i=0x00;i<RX8025_TIME_LENGTH;i++)
+ 186   1        {
+ 187   2          RX8025_IIC_WriteByte(timebuf[i]);//接收后，单片机回复应答
+ 188   2        }
+ 189   1        RX8025_IIC_Stop();
+ 190   1      }
+ 191          
+ 192          
+ 193          
+ 194          
+ 195          
+ 196          /*--------------------------------------------------------------------
+ 197          函数名称：RX8025初始化
+ 198          函数功能：
+ 199          注意事项：无
+ 200          提示说明：无
+ 201          输 入：无
+ 202          返 回：无
+ 203          --------------------------------------------------------------------*/
+ 204          void RX8025_Init(void)
+ 205          {
+ 206   1          
+ 207   1        RX8025_IIC_Init();
+ 208   1        
+ 209   1        RX8025_IIC_Start();
+ 210   1        RX8025_IIC_WriteByte(RX8025_WR);
+ 211   1        RX8025_IIC_WriteByte(RX8025_ADDR_CTOL1);  
+ 212   1        RX8025_IIC_WriteByte(0x60); 
+ 213   1        RX8025_IIC_Stop();
+ 214   1      }
+ 215          
+ 216          
+ 217          
+
+
+MODULE INFORMATION:   STATIC OVERLAYABLE
+   CODE SIZE        =    325    ----
+   CONSTANT SIZE    =   ----    ----
+   XDATA SIZE       =   ----    ----
+   PDATA SIZE       =   ----    ----
+   DATA SIZE        =      8      15
+   IDATA SIZE       =   ----    ----
+   BIT SIZE         =   ----    ----
+END OF MODULE INFORMATION.
+
+
+C51 COMPILATION COMPLETE.  0 WARNING(S),  0 ERROR(S)
